@@ -11,6 +11,31 @@ Use it when you need to run blocking I/O, legacy sync SDK calls, or CPU-heavy
 functions from an `asyncio` application without letting unbounded executor usage
 spread through the service.
 
+## Release notes
+
+### 0.1.2 — 2026-06-01
+
+`leasepool` 0.1.2 is a stability release focused on production shutdown behavior, lease correctness, executor health handling, and stricter validation.
+
+Highlights:
+
+* Prevented `acquire()` from returning a new lease while the manager is stopping or already stopped.
+* Fixed lease-expiry scheduling so newly acquired short leases wake the checker immediately.
+* Prevented expired leases from returning their executor to the available pool.
+* Added lease draining: if work was submitted through `lease.executor.submit()`, releasing the lease no longer returns the executor to the pool until submitted futures finish.
+* Retired broken executors instead of recycling them, including broken thread, process, and Python 3.14+ interpreter pools.
+* Deferred executor shutdown from future callbacks to avoid callback-thread deadlocks or hangs.
+* Added strict validation for integer sizing options: `max_pools`, `min_pools`, `units_per_pool`, and `workers_per_pool`.
+* Added strict finite-duration validation for `check_interval`, `default_lease_seconds`, `lease_grace_seconds`, and per-acquire `lease_seconds`.
+* Fixed `WorkGrinder.stop(cancel_pending=True)` so it cancels queued and in-flight grinder work instead of hanging while blocked on lease acquisition.
+* Added WorkGrinder event-loop ownership checks. Async methods must be called from the loop that started the grinder; use `submit_from_thread()` and `stats_from_thread()` from other OS threads.
+* Expanded regression tests for shutdown races, expiry behavior, lease draining, broken executors, validation, WorkGrinder cancellation, and cross-thread APIs.
+
+Upgrade note:
+
+`lease_grace_seconds=0.0` is valid and means no grace period. Other lease/checker durations must be finite positive numbers. Integer sizing values must be real integer-like values; fractional values such as `0.9` are rejected instead of being silently truncated.
+
+
 ## Install
 
 ```bash
@@ -28,6 +53,7 @@ pip install -e .
 - GitHub: https://github.com/jackofsometrades99/leasepool
 - PyPI: https://pypi.org/project/leasepool/
 - Official Documentation: https://leasepool.readthedocs.io/en/latest/
+- Blog: https://medium.com/@get4sambhugn/async-python-has-an-executor-problem-so-i-built-leasepool-85bb98235c36
 
 ## Free-threaded Python / no-GIL support
 
@@ -240,10 +266,26 @@ finally:
 
 Use:
 
-- `await grinder.submit(...)` to queue work and wait for its result.
-- `await grinder.enqueue(...)` to receive an `asyncio.Future` immediately.
-- `grinder.submit_from_thread(...)` from non-async code or another OS thread.
-- `grinder.stats()` for diagnostics from the event-loop thread.
+* `await grinder.submit(...)` to queue work and wait for its result from the grinder's owning event loop.
+* `await grinder.enqueue(...)` to receive an `asyncio.Future` immediately from the grinder's owning event loop.
+* `grinder.submit_from_thread(...)` from non-async code or another OS thread.
+* `grinder.stats()` for diagnostics before start, after stop, or from the owning event loop while running.
+* `grinder.stats_from_thread(...)` for diagnostics from another OS thread.
+
+Shutdown behavior:
+
+```python
+await grinder.stop(cancel_pending=False)
+```
+
+Drains already queued work before stopping.
+
+```python
+await grinder.stop(cancel_pending=True)
+```
+
+Cancels queued pending work and cancels the grinder task if it is blocked waiting for a lease or waiting for in-flight executor work.
+
 
 ## Process worker log forwarding
 
