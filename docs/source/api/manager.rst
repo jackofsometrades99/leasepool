@@ -56,6 +56,25 @@ Acquiring and releasing
    Return a lease manually. Most users call ``await lease.release()`` or use the
    lease as an async context manager instead.
 
+Lease draining
+~~~~~~~~~~~~~~
+
+If work was submitted through ``lease.executor.submit()``, releasing the lease
+marks it as released and rejects new submissions, but the executor is not
+returned to the available pool until submitted futures finish.
+
+This prevents work submitted under one lease from overlapping with work submitted
+under a later lease on the same executor.
+
+Broken executor handling
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+If an executor becomes broken, the manager retires it, removes it from active
+leases, shuts it down, and creates replacement capacity when needed.
+
+Shutdown triggered from future callbacks is deferred out of the callback context
+to avoid deadlocks or hangs in backend-owned callback threads.
+
 Sizing and diagnostics
 ~~~~~~~~~~~~~~~~~~~~~~
 

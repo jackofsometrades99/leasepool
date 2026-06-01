@@ -80,6 +80,22 @@ LeasedExecutorManager
    process backend this can include options such as ``initializer``, ``initargs``,
    ``mp_context``, or ``max_tasks_per_child``.
 
+Validation notes
+----------------
+
+``max_pools``, ``min_pools``, ``units_per_pool``, and ``workers_per_pool`` must
+be positive integer-like values. Fractional values are rejected instead of being
+silently truncated.
+
+``check_interval`` and ``default_lease_seconds`` must be finite numbers greater
+than zero.
+
+``lease_grace_seconds`` must be a finite number greater than or equal to zero.
+Use ``lease_grace_seconds=0.0`` for no grace period.
+
+Per-call ``lease_seconds`` passed to ``manager.acquire()`` must be a finite
+number greater than zero.
+
 Process logging configuration
 -----------------------------
 
@@ -174,6 +190,25 @@ WorkGrinder
 
 ``owner_prefix``
    Prefix used to label batch leases in manager diagnostics.
+
+Loop ownership
+--------------
+
+``WorkGrinder`` async methods are bound to the event loop that called
+``await grinder.start()``.
+
+Call these from the owning event loop:
+
+* ``await grinder.submit(...)``;
+* ``await grinder.enqueue(...)``;
+* ``await grinder.stop(...)``;
+* ``await grinder.astats()``;
+* ``grinder.stats()`` while the grinder is running.
+
+Call these from other OS threads:
+
+* ``grinder.submit_from_thread(...)``;
+* ``grinder.stats_from_thread(...)``.
 
 max_pools is per manager
 ------------------------

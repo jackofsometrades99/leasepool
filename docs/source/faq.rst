@@ -57,3 +57,23 @@ Can I pass executor-specific options?
 Yes. Extra keyword arguments passed to ``LeasedExecutorManager`` are forwarded to
 the underlying executor constructor. For example, process managers can receive
 ``initializer``, ``initargs``, ``mp_context``, or ``max_tasks_per_child``.
+
+What happens if I release a lease while submitted work is still running?
+-----------------------------------------------------------------------
+
+The lease enters a draining state. New submissions through that lease are
+rejected, and the executor is returned to the pool only after submitted futures
+finish.
+
+Does lease expiry kill already-running work?
+--------------------------------------------
+
+No. Lease expiry prevents new submissions after hard expiry and may shut down the
+underlying executor with normal executor semantics. Already-running Python code
+follows the behavior of the selected backend.
+
+Can I call WorkGrinder from another event loop?
+-----------------------------------------------
+
+Call async WorkGrinder methods only from the event loop that started the grinder.
+Use ``submit_from_thread()`` and ``stats_from_thread()`` from another OS thread.

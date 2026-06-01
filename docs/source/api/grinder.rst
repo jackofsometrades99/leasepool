@@ -28,11 +28,14 @@ Lifecycle
 ~~~~~~~~~
 
 ``await grinder.start()``
-   Start the background grinder task.
+   Start the background grinder task and bind the grinder to the current event
+   loop.
 
 ``await grinder.stop(cancel_pending=False)``
    Stop the grinder. Pending work is drained by default. With
-   ``cancel_pending=True``, queued pending work is cancelled.
+   ``cancel_pending=True``, queued pending work is cancelled and the grinder task
+   is cancelled if it is blocked waiting for a lease or waiting for in-flight
+   executor work.
 
 Submitting work
 ~~~~~~~~~~~~~~~
@@ -50,4 +53,18 @@ Diagnostics
 ~~~~~~~~~~~
 
 ``grinder.stats()``
-   Return a diagnostic snapshot. Call it from the event-loop thread.
+   Return a diagnostic snapshot. Safe before start and after stop. While the
+   grinder is running, call it from the owning event loop.
+
+``await grinder.astats()``
+   Return a diagnostic snapshot from the owning event loop.
+
+``grinder.stats_from_thread(timeout=None)``
+   Return diagnostics from another OS thread.
+
+Loop ownership
+~~~~~~~~~~~~~~
+
+Async WorkGrinder methods must be called from the event loop that started the
+grinder. Use ``submit_from_thread()`` and ``stats_from_thread()`` from other OS
+threads.
