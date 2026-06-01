@@ -91,10 +91,16 @@ class WorkGrinder:
 
         This method initializes the event loop and starts the grinder loop task.
         """
+        running_loop = asyncio.get_running_loop()
+
         if self._started:
+            if self._loop is not running_loop:
+                raise RuntimeError(
+                    "WorkGrinder is already started on a different event loop"
+                )
             return
 
-        self._loop = asyncio.get_running_loop()
+        self._loop = running_loop
         self._stopping = False
         self._task = asyncio.create_task(
             self._grinder_loop(),
@@ -119,6 +125,7 @@ class WorkGrinder:
         if not self._started:
             return
 
+        _ = self._require_owner_loop()
         self._stopping = True
 
         async with self._condition:
@@ -130,13 +137,22 @@ class WorkGrinder:
 
             self._condition.notify_all()
 
-        if self._task:
+        task = self._task
+        if task is not None:
+            if cancel_pending:
+                task.cancel()
+
             try:
-                await self._task
+                await task
+            except asyncio.CancelledError:
+                if not cancel_pending:
+                    raise
             finally:
                 self._task = None
 
         self._started = False
+        self._stopping = False
+        self._loop = None
         self._logger.info("WorkGrinder stopped")
 
     async def submit(
@@ -180,13 +196,12 @@ class WorkGrinder:
         Returns:
             asyncio.Future[Any]: A future representing the result of the work item.
         """
-        if not self._started or self._loop is None:
-            raise RuntimeError("WorkGrinder is not started")
+        loop = self._require_owner_loop()
 
         if self._stopping:
             raise RuntimeError("WorkGrinder is stopping")
 
-        result_future: asyncio.Future[Any] = self._loop.create_future()
+        result_future: asyncio.Future[Any] = loop.create_future()
 
         item = _WorkItem(
             work_id=uuid.uuid4().hex,
@@ -194,7 +209,7 @@ class WorkGrinder:
             args=args,
             kwargs=kwargs,
             result_future=result_future,
-            submitted_at=self._loop.time(),
+            submitted_at=loop.time(),
             owner=owner,
         )
 
@@ -236,30 +251,36 @@ class WorkGrinder:
         Returns:
             ConcurrentFuture[Any]: A future representing the result of the work item.
         """
-        if self._loop is None:
+        loop = self._loop
+
+        if not self._started or loop is None or loop.is_closed():
             raise RuntimeError("WorkGrinder is not started")
+
+        if self._stopping:
+            raise RuntimeError("WorkGrinder is stopping")
 
         return asyncio.run_coroutine_threadsafe(
             self.submit(fn, *args, owner=owner, **kwargs),
-            self._loop,
+            loop,
         )
 
     def stats(self) -> dict[str, Any]:
         """Get the current statistics of the WorkGrinder.
 
-        This method must be called from the WorkGrinder event-loop thread.
-        Use stats_from_thread() from other threads.
-
-        Returns:
-            dict[str, Any]: A dictionary containing the current statistics.
+        This method must be called from the WorkGrinder event-loop thread while
+        the grinder is running. Use stats_from_thread() from other threads.
+        It is also safe before start or after stop.
         """
         oldest_wait_seconds = 0.0
 
-        if self._pending and self._loop is not None:
-            oldest_wait_seconds = max(
-                0.0,
-                self._loop.time() - self._pending[0].submitted_at,
-            )
+        if self._started:
+            loop = self._require_owner_loop()
+
+            if self._pending:
+                oldest_wait_seconds = max(
+                    0.0,
+                    loop.time() - self._pending[0].submitted_at,
+                )
 
         return {
             "started": self._started,
@@ -277,13 +298,14 @@ class WorkGrinder:
         Returns:
             dict[str, Any]: A dictionary containing the current statistics.
         """
+        loop = self._require_owner_loop()
         async with self._condition:
             oldest_wait_seconds = 0.0
 
-            if self._pending and self._loop is not None:
+            if self._pending:
                 oldest_wait_seconds = max(
                     0.0,
-                    self._loop.time() - self._pending[0].submitted_at,
+                    loop.time() - self._pending[0].submitted_at,
                 )
 
             return {
@@ -310,11 +332,38 @@ class WorkGrinder:
         Returns:
             dict[str, Any]: A dictionary containing the current statistics.
         """
-        if self._loop is None:
+        loop = self._loop
+
+        if not self._started or loop is None or loop.is_closed():
             raise RuntimeError("WorkGrinder is not started")
 
-        future = asyncio.run_coroutine_threadsafe(self.astats(), self._loop)
+        future = asyncio.run_coroutine_threadsafe(self.astats(), loop)
         return future.result(timeout=timeout)
+
+    def _require_owner_loop(self) -> asyncio.AbstractEventLoop:
+        """Return the owning loop or raise if called from the wrong loop."""
+        owner_loop = self._loop
+
+        if not self._started or owner_loop is None:
+            raise RuntimeError("WorkGrinder is not started")
+
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError as exc:
+            raise RuntimeError(
+                "WorkGrinder async methods must be called from its owning "
+                "event loop; use submit_from_thread() or stats_from_thread() "
+                "from other threads."
+            ) from exc
+
+        if running_loop is not owner_loop:
+            raise RuntimeError(
+                "WorkGrinder async methods must be called from its owning "
+                "event loop; use submit_from_thread() or stats_from_thread() "
+                "from other threads."
+            )
+
+        return owner_loop
 
     async def _grinder_loop(self) -> None:
         """The main loop of the WorkGrinder.
@@ -421,6 +470,7 @@ class WorkGrinder:
         )
 
         lease = None
+        executor_futures: list[asyncio.Future[Any]] = []
 
         try:
             lease = await self._executor_manager.acquire(
@@ -430,8 +480,6 @@ class WorkGrinder:
             )
 
             loop = asyncio.get_running_loop()
-
-            executor_futures: list[asyncio.Future[Any]] = []
 
             for item in live_batch:
                 call = functools.partial(item.fn, *item.args, **item.kwargs)
@@ -462,6 +510,22 @@ class WorkGrinder:
                 batch_id,
                 len(live_batch),
             )
+
+        except asyncio.CancelledError:
+            self._logger.info(
+                "Cancelled batch batch_id=%s size=%s",
+                batch_id,
+                len(live_batch),
+            )
+
+            for executor_future in executor_futures:
+                executor_future.cancel()
+
+            for item in live_batch:
+                if not item.result_future.done():
+                    item.result_future.cancel()
+
+            raise
 
         except Exception as exc:
             self._logger.exception(
