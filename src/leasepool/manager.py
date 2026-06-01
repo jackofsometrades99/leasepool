@@ -7,11 +7,18 @@ import multiprocessing
 import threading
 import time
 import uuid
+import operator
 from collections import deque
 from collections.abc import Callable
-from concurrent.futures import Executor, Future
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
+from contextlib import suppress
+from concurrent.futures import (
+    BrokenExecutor,
+    CancelledError as FutureCancelledError,
+    Executor,
+    Future,
+)
 
 from ._process_logging import (
     ProcessLoggingConfig,
@@ -31,6 +38,52 @@ from .types import SizeProvider
 logger = logging.getLogger(__name__)
 
 
+def _coerce_positive_int(name: str, value: object) -> int:
+    """Coerce an integer-like config value and reject truncating conversions."""
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be an integer > 0")
+
+    try:
+        coerced = operator.index(value)
+    except TypeError as exc:
+        raise ValueError(f"{name} must be an integer > 0") from exc
+
+    if coerced <= 0:
+        raise ValueError(f"{name} must be > 0")
+
+    return coerced
+
+
+def _coerce_finite_duration(
+    name: str,
+    value: object,
+    *,
+    allow_zero: bool = False,
+) -> float:
+    """Coerce a duration and reject NaN, infinity, and invalid bounds."""
+    if isinstance(value, bool):
+        bound = ">= 0" if allow_zero else "> 0"
+        raise ValueError(f"{name} must be a finite number {bound}")
+
+    try:
+        coerced = float(value)
+    except (TypeError, ValueError) as exc:
+        bound = ">= 0" if allow_zero else "> 0"
+        raise ValueError(f"{name} must be a finite number {bound}") from exc
+
+    if not math.isfinite(coerced):
+        bound = ">= 0" if allow_zero else "> 0"
+        raise ValueError(f"{name} must be a finite number {bound}")
+
+    if allow_zero:
+        if coerced < 0:
+            raise ValueError(f"{name} must be >= 0")
+    elif coerced <= 0:
+        raise ValueError(f"{name} must be > 0")
+
+    return coerced
+
+
 @dataclass(slots=True)
 class _LeaseRecord:
     lease_id: str
@@ -39,6 +92,9 @@ class _LeaseRecord:
     leased_at: float
     lease_seconds: float
     grace_seconds: float
+    pending_futures: set[Future] = field(default_factory=set)
+    release_requested: bool = False
+    broken: bool = False
 
     @property
     def soft_expires_at(self) -> float:
@@ -166,14 +222,54 @@ class LeasedExecutorManager:
         clear_process_log_handlers: bool = True,
         **executor_kwargs: Any,
     ):
-        if max_pools <= 0:
-            raise ValueError("max_pools must be > 0")
-        if min_pools <= 0:
-            raise ValueError("min_pools must be > 0")
-        if units_per_pool <= 0:
-            raise ValueError("units_per_pool must be > 0")
-        if workers_per_pool <= 0:
-            raise ValueError("workers_per_pool must be > 0")
+        """Init the LeasedExecutorManager.
+
+        Args:
+            max_pools (int): Maximum number of executor pools to create.
+            backend (ExecutorBackend | str, optional): The backend type for the executor. Defaults to ExecutorBackend.THREAD.
+            min_pools (int, optional): Minimum number of executor pools to maintain. Defaults to 1.
+            units_per_pool (int, optional): Number of units per pool. Defaults to 10.
+            size_provider (SizeProvider | None, optional): Function to provide the size. Defaults to None.
+            check_interval (float, optional): Interval for checking the executor status. Defaults to 120.0.
+            default_lease_seconds (float, optional): Default lease duration in seconds. Defaults to 300.0.
+            lease_grace_seconds (float, optional): Grace period for lease expiration in seconds. Defaults to 15.0.
+            workers_per_pool (int, optional): Number of workers per pool. Defaults to 4.
+            name_prefix (str, optional): Prefix for naming executor pools. Defaults to "leasepool".
+            logger (logging.Logger | None, optional): Logger instance for logging. Defaults to None.
+            process_logging (ProcessLoggingConfig | None, optional): Configuration for process logging. Defaults to None.
+            forward_process_logs (bool, optional): Whether to forward process logs. Defaults to False.
+            process_log_level (int | str, optional): Logging level for process logs. Defaults to logging.INFO.
+            process_log_target_logger (logging.Logger | None, optional): Target logger for process logs. Defaults to None.
+            clear_process_log_handlers (bool, optional): Whether to clear process log handlers. Defaults to True.
+
+        Raises:
+            ValueError: If max_pools, min_pools, units_per_pool, or workers_per_pool are not positive integers.
+            ValueError: If default_lease_seconds, lease_grace_seconds, or check_interval are not finite durations.
+            ValueError: If min_pools is greater than max_pools.
+            ValueError: If process logging configuration is invalid.
+            ValueError: If process log forwarding is enabled for a non-process backend.
+        """
+        max_pools = _coerce_positive_int("max_pools", max_pools)
+        min_pools = _coerce_positive_int("min_pools", min_pools)
+        units_per_pool = _coerce_positive_int("units_per_pool", units_per_pool)
+        workers_per_pool = _coerce_positive_int("workers_per_pool", workers_per_pool)
+
+        default_lease_seconds = _coerce_finite_duration(
+            "default_lease_seconds",
+            default_lease_seconds,
+        )
+
+        lease_grace_seconds = _coerce_finite_duration(
+            "lease_grace_seconds",
+            lease_grace_seconds,
+            allow_zero=True,
+        )
+
+        check_interval = _coerce_finite_duration(
+            "check_interval",
+            check_interval,
+        )
+
         if min_pools > max_pools:
             raise ValueError("min_pools cannot be greater than max_pools")
 
@@ -210,14 +306,14 @@ class LeasedExecutorManager:
         self._process_log_listener: Any | None = None
         self._process_log_mp_context: multiprocessing.context.BaseContext | None = None
 
-        self._max_pools = int(max_pools)
-        self._min_pools = int(min_pools)
-        self._units_per_pool = int(units_per_pool)
+        self._max_pools = max_pools
+        self._min_pools = min_pools
+        self._units_per_pool = units_per_pool
         self._size_provider = size_provider
-        self._check_interval = float(check_interval)
-        self._default_lease_seconds = float(default_lease_seconds)
-        self._lease_grace_seconds = float(lease_grace_seconds)
-        self._workers_per_pool = int(workers_per_pool)
+        self._check_interval = check_interval
+        self._default_lease_seconds = default_lease_seconds
+        self._lease_grace_seconds = lease_grace_seconds
+        self._workers_per_pool = workers_per_pool
         self._name_prefix = name_prefix
         self._executor_kwargs = executor_kwargs
 
@@ -241,6 +337,7 @@ class LeasedExecutorManager:
         return self._backend
 
     async def start(self) -> None:
+        """Start the LeasedExecutorManager."""
         if self._started:
             return
 
@@ -285,6 +382,7 @@ class LeasedExecutorManager:
         )
 
     async def stop(self) -> None:
+        """Stop the LeasedExecutorManager."""
         self._stopping = True
 
         if self._checker_task:
@@ -309,6 +407,8 @@ class LeasedExecutorManager:
 
         self._stop_process_logging_if_needed()
         self._wake_waiters()
+        self._availability_event = None
+        self._scale_change_event = None
         self._logger.info("LeasedExecutorManager stopped")
 
     async def acquire(
@@ -344,14 +444,14 @@ class LeasedExecutorManager:
         if lease_seconds is None:
             lease_seconds = self._default_lease_seconds
 
-        lease_seconds = float(lease_seconds)
-        if lease_seconds <= 0:
-            raise ValueError("lease_seconds must be > 0")
+        lease_seconds = _coerce_finite_duration("lease_seconds", lease_seconds)
 
         started_at = time.monotonic()
 
         while True:
             with self._lock:
+                if not self._started or self._stopping:
+                    raise LeasePoolNotStartedError("LeasedExecutorManager is not started")
                 self._revoke_expired_leases_locked()
 
                 executor = self._take_or_create_available_locked()
@@ -378,7 +478,7 @@ class LeasedExecutorManager:
                         self._lease_grace_seconds,
                     )
 
-                    return ExecutorLease(
+                    lease = ExecutorLease(
                         manager=self,
                         lease_id=lease_id,
                         owner=owner,
@@ -386,6 +486,8 @@ class LeasedExecutorManager:
                         grace_seconds=self._lease_grace_seconds,
                         leased_at=leased_at,
                     )
+                    self._wake_checker()
+                    return lease
 
             if not wait:
                 raise LeaseUnavailableError(
@@ -403,12 +505,13 @@ class LeasedExecutorManager:
             else:
                 remaining = None
 
-            if self._availability_event is None:
+            event = self._availability_event
+            if event is None:
                 raise LeasePoolNotStartedError("LeasedExecutorManager is not started")
 
             try:
                 await asyncio.wait_for(
-                    self._availability_event.wait(),
+                    event.wait(),
                     timeout=remaining,
                 )
             except asyncio.TimeoutError as exc:
@@ -416,51 +519,48 @@ class LeasedExecutorManager:
                     f"Timed out waiting for an executor after {timeout}s"
                 ) from exc
             finally:
-                self._availability_event.clear()
+                event.clear()
 
     async def release(self, lease_id: str) -> None:
         """Release an executor lease.
 
-        Args:
-            lease_id (str): The ID of the lease to release.
+        If submitted futures are still running, the lease enters a draining state.
+        The executor is returned to the pool only after all tracked futures finish.
         """
-        executor: Executor | None = None
-        should_keep = False
+        executor_to_shutdown: Executor | None = None
+        finalized = False
 
         with self._lock:
-            record = self._leased.pop(lease_id, None)
+            record = self._leased.get(lease_id)
             if record is None:
                 return
 
-            executor = record.executor
+            record.release_requested = True
 
-            if self._stopping:
-                should_keep = False
-            else:
-                target = self._desired_executor_count_locked()
-                projected_total = self._current_count_locked() + 1
-                should_keep = projected_total <= target
+            if record.pending_futures:
+                self._logger.info(
+                    "Released executor lease_id=%s owner=%s pending=%s draining=True",
+                    lease_id,
+                    record.owner,
+                    len(record.pending_futures),
+                )
+                return
 
-                if should_keep:
-                    self._available.append(executor)
-
-            self._logger.info(
-                "Released executor lease_id=%s owner=%s kept=%s",
+            executor_to_shutdown, finalized = self._finalize_released_record_locked(
                 lease_id,
-                record.owner,
-                should_keep,
+                record,
             )
 
-            self._ensure_minimum_locked()
+        if executor_to_shutdown is not None:
+            self._shutdown_executor(executor_to_shutdown)
 
-        if executor is not None and not should_keep:
-            self._shutdown_executor(executor)
-
-        self._wake_waiters()
+        if finalized:
+            self._wake_waiters()
+            self._wake_checker()
 
     def notify_scale_changed(self) -> None:
         """Inform the checker that the size signal changed."""
-        self._wake_scale_checker()
+        self._wake_checker()
 
     def desired_executor_count(self) -> int:
         with self._lock:
@@ -480,6 +580,22 @@ class LeasedExecutorManager:
     def total_count(self) -> int:
         with self._lock:
             return self._current_count_locked()
+
+    @staticmethod
+    def _broken_exception_from_future(future: Future) -> BaseException | None:
+        """Return the broken-executor exception from a completed future, if any."""
+        if future.cancelled():
+            return None
+
+        try:
+            exc = future.exception()
+        except FutureCancelledError:
+            return None
+
+        if isinstance(exc, BrokenExecutor):
+            return exc
+
+        return None
 
     def stats(self) -> dict[str, Any]:
         """Get statistics about the executor manager.
@@ -516,33 +632,49 @@ class LeasedExecutorManager:
                 ],
             }
 
+    async def _wait_for_checker_event(
+        self,
+        event: asyncio.Event,
+        timeout: float,
+    ) -> None:
+        """Wait for checker wakeup or timeout without swallowing cancellation."""
+        if timeout <= 0:
+            await asyncio.sleep(0)
+            return
+
+        wait_task = asyncio.create_task(event.wait())
+
+        try:
+            await asyncio.wait({wait_task}, timeout=timeout)
+        finally:
+            if not wait_task.done():
+                wait_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await wait_task
+
     async def _checker_loop(self) -> None:
         """Checker loop for managing executor leases."""
         try:
             while True:
+                event = self._scale_change_event
+                assert event is not None
+
+                # I am clearing here before taking the state snapshot.
+                # Any acquire/release/scale change after this point will set the
+                # event and wake this iteration's wait.
+                event.clear()
                 with self._lock:
                     self._revoke_expired_leases_locked()
                     self._ensure_minimum_locked()
                     self._shrink_idle_if_above_target_locked()
                     next_expiry_delay = self._seconds_until_next_hard_expiry_locked()
-
-                self._wake_waiters()
+                    self._wake_waiters()
 
                 wait_seconds = self._check_interval
                 if next_expiry_delay is not None:
                     wait_seconds = min(wait_seconds, max(0.0, next_expiry_delay))
 
-                assert self._scale_change_event is not None
-
-                try:
-                    await asyncio.wait_for(
-                        self._scale_change_event.wait(),
-                        timeout=wait_seconds,
-                    )
-                except asyncio.TimeoutError:
-                    pass
-                finally:
-                    self._scale_change_event.clear()
+                await self._wait_for_checker_event(event, wait_seconds)
 
         except asyncio.CancelledError:
             raise
@@ -556,20 +688,9 @@ class LeasedExecutorManager:
         *args: Any,
         **kwargs: Any,
     ) -> Future:
-        """Submit a task for execution under a lease.
-
-        Args:
-            lease_id (str): _description_
-            fn (Callable[..., Any]): _description_
-
-        Raises:
-            LeaseExpiredError: _description_
-            LeaseExpiredError: _description_
-
-        Returns:
-            Future: _description_
-        """
+        """Submit a task for execution under a lease."""
         executor_to_shutdown: Executor | None = None
+        submit_error: BaseException | None = None
 
         with self._lock:
             record = self._leased.get(lease_id)
@@ -578,16 +699,40 @@ class LeasedExecutorManager:
 
             now = time.monotonic()
 
+            if record.release_requested:
+                raise LeaseExpiredError("Executor lease has been released")
+
             if now >= record.hard_expires_at:
                 self._leased.pop(lease_id, None)
                 executor_to_shutdown = record.executor
                 self._ensure_minimum_locked()
             else:
-                return record.executor.submit(fn, *args, **kwargs)
+                try:
+                    future = record.executor.submit(fn, *args, **kwargs)
+                except BrokenExecutor as exc:
+                    executor_to_shutdown = self._retire_broken_record_locked(
+                        lease_id,
+                        record,
+                        exc,
+                    )
+                    submit_error = exc
+                else:
+                    record.pending_futures.add(future)
+                    future.add_done_callback(
+                        lambda done_future, lease_id=lease_id: self._on_lease_future_done(
+                            lease_id,
+                            done_future,
+                        )
+                    )
+                    return future
 
         if executor_to_shutdown is not None:
             self._shutdown_executor(executor_to_shutdown)
             self._wake_waiters()
+            self._wake_checker()
+
+        if submit_error is not None:
+            raise submit_error
 
         raise LeaseExpiredError("Executor lease expired and was revoked")
 
@@ -810,6 +955,130 @@ class LeasedExecutorManager:
 
         return executor
 
+    def _retire_broken_record_locked(
+        self,
+        lease_id: str,
+        record: _LeaseRecord,
+        exc: BaseException,
+    ) -> Executor | None:
+        """Remove a broken executor from management.
+
+        The caller must shut down the returned executor outside the lock.
+        """
+        current = self._leased.get(lease_id)
+        if current is not record:
+            return None
+
+        self._leased.pop(lease_id, None)
+
+        # Prevent any later release/finalizer path from treating this executor as
+        # reusable. Existing Future objects are still owned by their callers.
+        record.release_requested = True
+        record.pending_futures.clear()
+        record.broken = True
+
+        self._logger.warning(
+            "Retiring broken executor lease_id=%s owner=%s exc_type=%s exc=%r",
+            lease_id,
+            record.owner,
+            type(exc).__name__,
+            exc,
+        )
+
+        self._ensure_minimum_locked()
+        return record.executor
+
+    def _on_lease_future_done(self, lease_id: str, future: Future) -> None:
+        """Update lease accounting when a submitted future completes."""
+        executor_to_shutdown: Executor | None = None
+        finalized = False
+        retired = False
+
+        broken_exc = self._broken_exception_from_future(future)
+
+        with self._lock:
+            record = self._leased.get(lease_id)
+            if record is None:
+                return
+
+            record.pending_futures.discard(future)
+
+            if broken_exc is not None:
+                executor_to_shutdown = self._retire_broken_record_locked(
+                    lease_id,
+                    record,
+                    broken_exc,
+                )
+                retired = executor_to_shutdown is not None
+
+            elif record.release_requested and not record.pending_futures:
+                executor_to_shutdown, finalized = self._finalize_released_record_locked(
+                    lease_id,
+                    record,
+                )
+
+        if executor_to_shutdown is not None:
+            self._shutdown_executor_from_callback(executor_to_shutdown)
+
+        if finalized or retired:
+            self._wake_waiters()
+            self._wake_checker()
+
+    def _finalize_released_record_locked(
+        self,
+        lease_id: str,
+        record: _LeaseRecord,
+    ) -> tuple[Executor | None, bool]:
+        """Finalize a released lease once all submitted futures are done.
+
+        Returns:
+            tuple[Executor | None, bool]:
+                executor to shut down outside the lock, if any;
+                whether the lease was finalized.
+        """
+        current = self._leased.get(lease_id)
+        if current is not record:
+            return None, False
+
+        if not record.release_requested:
+            return None, False
+
+        if record.pending_futures:
+            return None, False
+
+        self._leased.pop(lease_id, None)
+
+        executor = record.executor
+        should_keep = False
+
+        if (
+            not record.broken
+            and not self._stopping
+            and time.monotonic() < record.hard_expires_at
+        ):
+            target = self._desired_executor_count_locked()
+
+            # _leased no longer includes this record, so add 1 if we keep it.
+            projected_total = self._current_count_locked() + 1
+            should_keep = projected_total <= target
+
+            if should_keep:
+                self._available.append(executor)
+
+        self._logger.info(
+            "Finalized released executor lease_id=%s owner=%s kept=%s",
+            lease_id,
+            record.owner,
+            should_keep,
+        )
+
+        self._ensure_minimum_locked()
+
+        if should_keep:
+            return None, True
+
+        return executor, True
+
     @staticmethod
     def _shutdown_executor(executor: Executor) -> None:
         """Shutdown the given executor.
@@ -818,6 +1087,28 @@ class LeasedExecutorManager:
             executor (Executor): The executor to shutdown.
         """
         executor.shutdown(wait=False, cancel_futures=True)
+
+    def _shutdown_executor_from_callback(self, executor: Executor) -> None:
+        """Shutdown an executor from a Future callback without blocking callback threads.
+
+        Future callbacks may run in backend-owned threads: thread-pool workers,
+        process-pool manager threads, or interpreter-pool worker/manager threads.
+        Calling shutdown() synchronously from those callback contexts can deadlock
+        or self-join, so defer shutdown outside the callback.
+        """
+        loop = self._loop
+
+        if loop is not None and not loop.is_closed():
+            loop.call_soon_threadsafe(self._shutdown_executor, executor)
+            return
+
+        thread = threading.Thread(
+            target=self._shutdown_executor,
+            args=(executor,),
+            name=f"{self._name_prefix}-shutdown",
+            daemon=True,
+        )
+        thread.start()
 
     def _wake_waiters(self) -> None:
         """Wake up any waiters waiting for an available executor."""
@@ -829,12 +1120,14 @@ class LeasedExecutorManager:
 
         loop.call_soon_threadsafe(event.set)
 
-    def _wake_scale_checker(self) -> None:
-        """Wake up the scale checker to re-evaluate the desired executor count."""
+    def _wake_checker(self) -> None:
+        """Wake the checker to re-evaluate expiries and sizing."""
         event = self._scale_change_event
         loop = self._loop
-
         if event is None or loop is None or loop.is_closed():
             return
-
         loop.call_soon_threadsafe(event.set)
+
+    def _wake_scale_checker(self) -> None:
+        """Backward-compatible internal alias."""
+        self._wake_checker()

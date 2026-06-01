@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "leasepool"
-version = "0.1.1"
+version = "0.1.2"
 description = "Executor leasing, backpressure, and adaptive CPU/I/O offloading for async Python."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -14,7 +14,7 @@ authors = [
 ]
 keywords = ["asyncio", "concurrent.futures", "executor", "threadpool", "processpool", "backpressure"]
 classifiers = [
-  "Development Status :: 3 - Alpha",
+  "Development Status :: 5 - Production/Stable",
   "Framework :: AsyncIO",
   "Intended Audience :: Developers",
   "License :: OSI Approved :: Apache Software License",
@@ -35,8 +35,8 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/jackofsometrades99/leasepool"
-Repository = "https://pypi.org/project/leasepool/"
+Homepage = "https://pypi.org/project/leasepool/"
+Repository = "https://github.com/jackofsometrades99/leasepool"
 Documentation = "https://leasepool.readthedocs.io/en/latest/"
 
 [tool.hatch.build.targets.wheel]

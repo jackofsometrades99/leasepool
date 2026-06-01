@@ -20,6 +20,30 @@ For process-backend examples, run the file directly. Do not paste the code into
 an interactive REPL because `ProcessPoolExecutor` needs importable top-level
 functions.
 
+## Notes for 0.1.2 behavior
+
+The examples are compatible with the 0.1.2 stability fixes.
+
+Important behavior to know while running them:
+
+* Lease release is draining-aware. If you submit work through `lease.executor.submit()`, releasing the lease does not make that executor reusable until submitted futures finish.
+* Broken executors are retired and replaced rather than returned to the available pool.
+* Process-backend examples should be run as files, not pasted into a REPL, because process workers need importable top-level functions.
+* The interpreter backend example is for Python 3.14+ only. Earlier Python versions should raise `UnsupportedBackendError`.
+* `WorkGrinder` async methods belong to the event loop that called `await grinder.start()`.
+* Use `grinder.submit_from_thread(...)` and `grinder.stats_from_thread(...)` when calling from another OS thread.
+* `await grinder.stop(cancel_pending=True)` now cancels queued and in-flight grinder work, including cases where the grinder is blocked waiting for executor capacity.
+
+Recommended verification commands from the project root:
+
+```bash
+python -m compileall -q src tests
+pytest -q
+```
+
+For process and interpreter backend safety coverage, the regression suite includes tests for broken executor retirement and deferred callback shutdown.
+
+
 ## Recommended learning order
 
 1. `00_quickstart_thread_backend.py` — smallest complete manager/lease example.

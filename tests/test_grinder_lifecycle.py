@@ -115,10 +115,10 @@ def test_constructor_validation(kwargs: dict[str, object], message: str) -> None
 
 @pytest.mark.asyncio
 async def test_enqueue_returns_future_that_resolves() -> None:
-    manager = LeasedExecutorManager(max_pools=1, min_pools=1, workers_per_pool=2)
+    manager = LeasedExecutorManager(max_pools=1, min_pools=1, workers_per_pool=2, check_interval=1)
     grinder = WorkGrinder(
         executor_manager=manager,
-        max_wait_seconds=1,
+        max_wait_seconds=5,
         batch_size_threshold=1,
     )
 
@@ -136,10 +136,10 @@ async def test_enqueue_returns_future_that_resolves() -> None:
 
 @pytest.mark.asyncio
 async def test_batch_processes_when_threshold_is_reached() -> None:
-    manager = LeasedExecutorManager(max_pools=1, min_pools=1, workers_per_pool=4)
+    manager = LeasedExecutorManager(max_pools=1, min_pools=1, workers_per_pool=4, check_interval=1)
     grinder = WorkGrinder(
         executor_manager=manager,
-        max_wait_seconds=60,
+        max_wait_seconds=5,
         batch_size_threshold=5,
     )
 
@@ -157,7 +157,7 @@ async def test_batch_processes_when_threshold_is_reached() -> None:
 
 @pytest.mark.asyncio
 async def test_batch_processes_when_oldest_item_times_out() -> None:
-    manager = LeasedExecutorManager(max_pools=1, min_pools=1, workers_per_pool=2)
+    manager = LeasedExecutorManager(max_pools=1, min_pools=1, workers_per_pool=2, check_interval=1)
     grinder = WorkGrinder(
         executor_manager=manager,
         max_wait_seconds=0.05,
@@ -196,7 +196,7 @@ async def test_callable_exception_is_propagated_to_submitter() -> None:
 
 @pytest.mark.asyncio
 async def test_cancel_pending_stop_cancels_queued_futures() -> None:
-    manager = LeasedExecutorManager(max_pools=1, min_pools=1)
+    manager = LeasedExecutorManager(max_pools=1, min_pools=1, check_interval=1)
     grinder = WorkGrinder(
         executor_manager=manager,
         max_wait_seconds=60,
@@ -218,7 +218,7 @@ async def test_cancel_pending_stop_cancels_queued_futures() -> None:
 
 @pytest.mark.asyncio
 async def test_stop_without_cancel_drains_pending_work() -> None:
-    manager = LeasedExecutorManager(max_pools=1, min_pools=1)
+    manager = LeasedExecutorManager(max_pools=1, min_pools=1, check_interval=1)
     grinder = WorkGrinder(
         executor_manager=manager,
         max_wait_seconds=60,
@@ -240,7 +240,7 @@ async def test_stop_without_cancel_drains_pending_work() -> None:
 
 @pytest.mark.asyncio
 async def test_cancelled_work_item_is_skipped_but_other_items_complete() -> None:
-    manager = LeasedExecutorManager(max_pools=1, min_pools=1, workers_per_pool=2)
+    manager = LeasedExecutorManager(max_pools=1, min_pools=1, workers_per_pool=2, check_interval=1)
     grinder = WorkGrinder(
         executor_manager=manager,
         max_wait_seconds=1,
@@ -265,7 +265,7 @@ async def test_cancelled_work_item_is_skipped_but_other_items_complete() -> None
 
 @pytest.mark.asyncio
 async def test_submit_from_thread_returns_concurrent_future() -> None:
-    manager = LeasedExecutorManager(max_pools=1, min_pools=1, workers_per_pool=2)
+    manager = LeasedExecutorManager(max_pools=1, min_pools=1, workers_per_pool=2, check_interval=1)
     grinder = WorkGrinder(
         executor_manager=manager,
         max_wait_seconds=1,

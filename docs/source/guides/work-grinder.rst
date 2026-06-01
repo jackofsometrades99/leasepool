@@ -46,6 +46,26 @@ submit_from_thread
    :language: python
    :caption: examples/10_submit_from_thread.py
 
+Event-loop ownership
+--------------------
+
+``WorkGrinder`` belongs to the event loop that started it.
+
+Use these from the owning event loop:
+
+* ``await grinder.submit(...)``;
+* ``await grinder.enqueue(...)``;
+* ``await grinder.stop(...)``;
+* ``await grinder.astats()``.
+
+Use these from other OS threads:
+
+* ``grinder.submit_from_thread(...)``;
+* ``grinder.stats_from_thread(...)``.
+
+Calling async WorkGrinder methods from another event loop raises
+``RuntimeError``.
+
 Shutdown behavior
 -----------------
 
@@ -53,13 +73,19 @@ Shutdown behavior
 
    await grinder.stop(cancel_pending=False)
 
-Drains pending work before stopping.
+Drains queued work before stopping. This is the graceful shutdown path.
 
 .. code-block:: python
 
    await grinder.stop(cancel_pending=True)
 
-Cancels queued pending work immediately.
+Cancels queued pending work and cancels the grinder task if it is blocked
+waiting for a lease or waiting for in-flight executor work.
+
+Already-running synchronous functions follow the underlying executor semantics.
+For thread workers, cancelling the asyncio wrapper does not forcibly stop Python
+code that is already running in a worker thread. The executor lease remains
+managed safely by the manager's lease-draining behavior.
 
 Stop the grinder before stopping the manager it depends on:
 

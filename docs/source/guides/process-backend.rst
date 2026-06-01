@@ -81,6 +81,17 @@ For process pools this lets you pass options such as ``initializer``,
 When process log forwarding is enabled, leasepool composes its own initializer
 with your initializer so both run.
 
+Broken process pools
+--------------------
+
+If a process pool becomes broken, for example because a worker initializer fails
+or a worker exits unexpectedly, leasepool retires that executor instead of
+returning it to the available pool.
+
+The manager replaces capacity according to ``min_pools`` and adaptive sizing.
+Submitted futures still expose the underlying ``concurrent.futures`` exception,
+such as a broken-pool exception.
+
 Operational notes
 -----------------
 

@@ -67,6 +67,15 @@ After hard expiry, new submissions through a lease raise ``LeaseExpiredError``.
    :language: python
    :caption: examples/06_lease_expiry_and_revocation.py
 
+Broken executors
+----------------
+
+Broken executor failures come from ``concurrent.futures``. They may occur when a
+worker initializer fails or a worker process exits unexpectedly.
+
+leasepool does not hide those failures from submitted futures. It does prevent
+the broken executor from being reused by future leases.
+
 Full exception example
 ----------------------
 
