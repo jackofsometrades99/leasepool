@@ -15,8 +15,8 @@ if SRC.exists():
 project = "leasepool"
 author = "Sambhu Nampoothiri G"
 copyright = "2026, Sambhu Nampoothiri G"
-release = "0.1.2"
-version = "0.1.2"
+release = "0.1.3"
+version = "0.1.3"
 
 extensions = [
     "sphinx.ext.autodoc",

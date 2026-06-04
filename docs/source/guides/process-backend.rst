@@ -48,6 +48,14 @@ Basic example
    :language: python
    :caption: examples/07_process_backend_cpu_work.py
 
+.. note::
+
+   When ``forward_process_logs=True`` or ``ProcessLoggingConfig(enabled=True)``
+   is used without an explicit ``mp_context``, leasepool selects a non-fork
+   multiprocessing context by default. This may require submitted callables,
+   arguments, initializers, and return values to be picklable and importable by
+   child processes.
+
 Keyword arguments
 -----------------
 

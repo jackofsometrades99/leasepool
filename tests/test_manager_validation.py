@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import threading
 import pytest
 
 from leasepool import ExecutorBackend, LeasedExecutorManager, LeasePoolNotStartedError
@@ -73,6 +75,38 @@ async def test_start_is_idempotent() -> None:
 
 
 @pytest.mark.asyncio
+async def test_start_rejects_wrong_event_loop_after_started() -> None:
+    manager = LeasedExecutorManager(max_pools=1, min_pools=1)
+
+    await manager.start()
+
+    errors: list[BaseException] = []
+
+    def run_other_loop() -> None:
+        async def call_start_from_wrong_loop() -> None:
+            with pytest.raises(RuntimeError, match="owning event loop"):
+                await manager.start()
+
+        try:
+            asyncio.run(call_start_from_wrong_loop())
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=run_other_loop)
+    thread.start()
+    thread.join(timeout=2.0)
+
+    try:
+        assert not thread.is_alive()
+        assert errors == []
+        assert manager.total_count == 1
+        assert manager.available_count == 1
+        assert manager.leased_count == 0
+    finally:
+        await manager.stop()
+
+
+@pytest.mark.asyncio
 async def test_manager_can_restart_after_stop() -> None:
     manager = LeasedExecutorManager(max_pools=1, min_pools=1)
 
@@ -130,5 +164,115 @@ async def test_bad_size_provider_falls_back_to_minimum() -> None:
     try:
         assert manager.desired_executor_count() == 1
         assert manager.total_count == 1
+    finally:
+        await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_stop_rejects_wrong_event_loop_without_changing_state() -> None:
+    manager = LeasedExecutorManager(max_pools=1, min_pools=1)
+
+    await manager.start()
+
+    errors: list[BaseException] = []
+
+    def run_other_loop() -> None:
+        async def call_stop_from_wrong_loop() -> None:
+            with pytest.raises(RuntimeError, match="owning event loop"):
+                await manager.stop()
+
+        try:
+            asyncio.run(call_stop_from_wrong_loop())
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=run_other_loop)
+    thread.start()
+    thread.join(timeout=2.0)
+
+    try:
+        assert not thread.is_alive()
+        assert errors == []
+
+        # Proves the failed wrong-loop stop did not set _stopping=True
+        # or clear the manager's executor state.
+        assert manager.total_count == 1
+        assert manager.available_count == 1
+        assert manager.leased_count == 0
+
+        lease = await manager.acquire(wait=False)
+        await lease.release()
+
+        assert manager.total_count == 1
+        assert manager.available_count == 1
+        assert manager.leased_count == 0
+    finally:
+        await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_acquire_rejects_wrong_event_loop_without_waiting() -> None:
+    manager = LeasedExecutorManager(max_pools=1, min_pools=1)
+
+    await manager.start()
+    lease = await manager.acquire(owner="owner-loop")
+
+    errors: list[BaseException] = []
+
+    def run_other_loop() -> None:
+        async def call_acquire_from_wrong_loop() -> None:
+            with pytest.raises(RuntimeError, match="owning event loop"):
+                await manager.acquire(owner="wrong-loop", timeout=0.25)
+
+        try:
+            asyncio.run(call_acquire_from_wrong_loop())
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=run_other_loop)
+    thread.start()
+    thread.join(timeout=2.0)
+
+    try:
+        assert not thread.is_alive()
+        assert errors == []
+
+        # Proves the wrong-loop acquire did not create or steal a lease.
+        assert manager.total_count == 1
+        assert manager.available_count == 0
+        assert manager.leased_count == 1
+    finally:
+        await lease.release()
+        await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_acquire_wait_false_rejects_wrong_event_loop() -> None:
+    manager = LeasedExecutorManager(max_pools=1, min_pools=1)
+
+    await manager.start()
+
+    errors: list[BaseException] = []
+
+    def run_other_loop() -> None:
+        async def call_acquire_from_wrong_loop() -> None:
+            with pytest.raises(RuntimeError, match="owning event loop"):
+                await manager.acquire(owner="wrong-loop", wait=False)
+
+        try:
+            asyncio.run(call_acquire_from_wrong_loop())
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=run_other_loop)
+    thread.start()
+    thread.join(timeout=2.0)
+
+    try:
+        assert not thread.is_alive()
+        assert errors == []
+        assert manager.total_count == 1
+        assert manager.available_count == 1
+        assert manager.leased_count == 0
     finally:
         await manager.stop()

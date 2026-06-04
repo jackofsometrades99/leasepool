@@ -19,6 +19,32 @@ bridge configuration:
    :language: python
    :caption: examples/13_process_log_forwarding.py
 
+Multiprocessing context selection
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When process log forwarding is enabled, leasepool starts a parent-side
+``QueueListener`` thread. If no explicit ``mp_context`` is supplied, leasepool
+chooses a non-fork multiprocessing context for process pools and logging queues,
+preferring ``forkserver`` and then ``spawn``.
+
+This avoids forking a multithreaded parent process after the logging listener has
+started.
+
+If your application requires a specific multiprocessing start method, pass an
+explicit context:
+
+.. code-block:: python
+
+   import multiprocessing
+
+   manager = LeasedExecutorManager(
+       backend="process",
+       max_pools=1,
+       min_pools=1,
+       forward_process_logs=True,
+       mp_context=multiprocessing.get_context("spawn"),
+   )
+
 Convenience configuration
 -------------------------
 

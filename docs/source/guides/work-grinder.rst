@@ -94,6 +94,64 @@ Stop the grinder before stopping the manager it depends on:
    await grinder.stop(cancel_pending=True)
    await manager.stop()
 
+Validation
+~~~~~~~~~~
+
+``WorkGrinder`` validates its batching and lease configuration at construction
+time.
+
+``batch_size_threshold`` must be a strict positive integer. Fractional values
+such as ``1.9`` are rejected instead of being truncated.
+
+``max_wait_seconds`` and ``lease_seconds`` must be finite positive numbers.
+``NaN``, positive infinity, negative infinity, booleans, strings, zero, and
+negative values are rejected.
+
+Cross-thread APIs
+~~~~~~~~~~~~~~~~~
+
+``submit_from_thread()`` and ``stats_from_thread()`` are only for non-owner OS
+threads. They must not be called from the event-loop thread that started the
+grinder.
+
+From the owning event loop, use:
+
+.. code-block:: python
+
+   await grinder.submit(...)
+   await grinder.enqueue(...)
+   grinder.stats()
+   await grinder.astats()
+
+From another OS thread, use:
+
+.. code-block:: python
+
+   future = grinder.submit_from_thread(sync_fn, arg)
+   result = future.result(timeout=2)
+
+   stats = grinder.stats_from_thread(timeout=2)
+
+Cancellation
+~~~~~~~~~~~~
+
+If a future returned by ``enqueue()`` is cancelled while still pending, the item
+is removed from the pending queue promptly. This keeps ``grinder.stats()`` accurate
+and avoids retaining cancelled work until the next batch threshold, timeout, or
+shutdown.
+
+Partial batch submission failures
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+WorkGrinder treats batch items independently.
+
+If a submitted callable raises, only that caller receives the callable exception.
+Other submitted work in the same batch can still complete normally.
+
+If executor submission fails part-way through a batch, already-submitted work is
+awaited and receives its real result or exception. Only work that was not
+submitted receives the submission failure.
+
 Diagnostics
 -----------
 

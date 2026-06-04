@@ -132,3 +132,18 @@ Process log forwarding
 Logs emitted inside ``ProcessPoolExecutor`` workers are produced in child
 processes. Enable ``ProcessLoggingConfig`` or ``forward_process_logs=True`` when
 you want those log records forwarded through a logger in the parent process.
+
+Event-loop ownership
+--------------------
+
+``LeasedExecutorManager`` is bound to the event loop that starts it. After
+``await manager.start()``, loop-bound async APIs such as ``start()``, ``stop()``,
+and ``acquire()`` must be called from that same event loop.
+
+This prevents cross-loop use of asyncio events, tasks, and waiters. Cross-thread
+or cross-loop application designs should schedule work onto the owning loop using
+an explicit thread-safe boundary.
+
+``WorkGrinder`` follows the same model. Async methods are used from the owning
+event loop. The ``submit_from_thread()`` and ``stats_from_thread()`` methods are
+only for other OS threads.

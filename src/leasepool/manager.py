@@ -339,6 +339,7 @@ class LeasedExecutorManager:
     async def start(self) -> None:
         """Start the LeasedExecutorManager."""
         if self._started:
+            self._require_owner_loop("start")
             return
 
         self._loop = asyncio.get_running_loop()
@@ -383,6 +384,10 @@ class LeasedExecutorManager:
 
     async def stop(self) -> None:
         """Stop the LeasedExecutorManager."""
+        if not self._started:
+            return
+
+        self._require_owner_loop("stop")
         self._stopping = True
 
         if self._checker_task:
@@ -409,6 +414,8 @@ class LeasedExecutorManager:
         self._wake_waiters()
         self._availability_event = None
         self._scale_change_event = None
+        self._loop = None
+        self._stopping = False
         self._logger.info("LeasedExecutorManager stopped")
 
     async def acquire(
@@ -440,6 +447,8 @@ class LeasedExecutorManager:
         """
         if not self._started:
             raise LeasePoolNotStartedError("LeasedExecutorManager is not started")
+
+        self._require_owner_loop("acquire")
 
         if lease_seconds is None:
             lease_seconds = self._default_lease_seconds
@@ -838,6 +847,28 @@ class LeasedExecutorManager:
         """
         return len(self._available) + len(self._leased)
 
+    def _default_process_logging_mp_context(
+        self,
+    ) -> multiprocessing.context.BaseContext:
+        """Choose a non-fork context for process log forwarding.
+
+        Process log forwarding starts a QueueListener thread in the parent.
+        Using fork after that point can duplicate a multithreaded parent into
+        workers, which is unsafe on POSIX and deprecated on newer Python
+        versions.
+        """
+        available_methods = multiprocessing.get_all_start_methods()
+
+        if "forkserver" in available_methods:
+            return multiprocessing.get_context("forkserver")
+
+        if "spawn" in available_methods:
+            return multiprocessing.get_context("spawn")
+
+        # Very unusual platform fallback. On normal supported platforms,
+        # Windows/macOS provide spawn and POSIX provides forkserver/spawn.
+        return multiprocessing.get_context()
+
     def _start_process_logging_if_needed(self) -> None:
         """Start the parent-side process logging bridge, if configured."""
         if self._backend is not ExecutorBackend.PROCESS:
@@ -855,7 +886,7 @@ class LeasedExecutorManager:
             if self._executor_kwargs.get("max_tasks_per_child") is not None:
                 mp_context = multiprocessing.get_context("spawn")
             else:
-                mp_context = multiprocessing.get_context()
+                mp_context = self._default_process_logging_mp_context()
 
         self._process_log_mp_context = mp_context
         self._process_log_queue = mp_context.Queue(-1)
@@ -1131,3 +1162,27 @@ class LeasedExecutorManager:
     def _wake_scale_checker(self) -> None:
         """Backward-compatible internal alias."""
         self._wake_checker()
+
+    def _require_owner_loop(self, method_name: str) -> asyncio.AbstractEventLoop:
+        """Return the owning loop or raise if called from the wrong loop."""
+        owner_loop = self._loop
+
+        if owner_loop is None:
+            raise LeasePoolNotStartedError("LeasedExecutorManager is not started")
+
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"LeasedExecutorManager.{method_name}() must be called from "
+                "its owning event loop."
+            ) from exc
+
+        if running_loop is not owner_loop:
+            raise RuntimeError(
+                f"LeasedExecutorManager.{method_name}() must be called from "
+                "its owning event loop."
+            )
+
+        return owner_loop
+
