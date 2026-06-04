@@ -77,3 +77,17 @@ Can I call WorkGrinder from another event loop?
 
 Call async WorkGrinder methods only from the event loop that started the grinder.
 Use ``submit_from_thread()`` and ``stats_from_thread()`` from another OS thread.
+
+Why does manager.acquire() raise "owning event loop"?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A started manager is bound to the event loop that started it. Use it from that
+loop, or schedule work onto that loop through an application-level thread-safe
+boundary.
+
+Why does submit_from_thread() fail inside async code?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``submit_from_thread()`` is only for non-owner OS threads. Inside async code on
+the grinder's owning loop, use ``await grinder.submit(...)`` or
+``await grinder.enqueue(...)``.

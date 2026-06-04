@@ -47,7 +47,8 @@ Submitting work
    Queue work and return an ``asyncio.Future`` immediately.
 
 ``grinder.submit_from_thread(fn, *args, owner=None, **kwargs)``
-   Submit from another OS thread and receive a ``concurrent.futures.Future``.
+   Thread-safe submission API for non-owner OS threads. Raises ``RuntimeError``
+   if called from the owning event-loop thread.
 
 Diagnostics
 ~~~~~~~~~~~
@@ -60,7 +61,8 @@ Diagnostics
    Return a diagnostic snapshot from the owning event loop.
 
 ``grinder.stats_from_thread(timeout=None)``
-   Return diagnostics from another OS thread.
+   Thread-safe stats API for non-owner OS threads. Raises ``RuntimeError`` if
+   called from the owning event-loop thread.
 
 Loop ownership
 ~~~~~~~~~~~~~~

@@ -4,8 +4,6 @@ Installation
 Install from PyPI
 -----------------
 
-When the package is published:
-
 .. code-block:: bash
 
    pip install leasepool
@@ -43,13 +41,25 @@ Open the generated HTML:
 Python support
 --------------
 
-The initial version targets Python 3.11+.
-
-Python 3.11 supports:
+Python 3.11 to 3.13 only supports:
 
 * ``ThreadPoolExecutor``
 * ``ProcessPoolExecutor``
 
-Python 3.14+ will later support:
+Python 3.14+ will support:
 
+* ``ThreadPoolExecutor``
+* ``ProcessPoolExecutor``
 * ``InterpreterPoolExecutor``
+
+
+Free-threaded Python
+--------------------
+
+leasepool is pure Python and has been tested on CPython 3.14t free-threaded
+builds with the GIL disabled.
+
+leasepool manages executor leases, backpressure, shutdown, and WorkGrinder
+batching under free-threaded Python. User-submitted callables are still
+responsible for their own thread-safety when they mutate shared state or use
+non-thread-safe third-party libraries.

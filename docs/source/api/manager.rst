@@ -40,11 +40,13 @@ Lifecycle
 
 ``await manager.start()``
    Start the manager, create the minimum/desired pool count, and start the
-   checker task.
+   checker task. After the manager has started, this method must be called from the owning event
+   loop. Calling it from another event loop raises ``RuntimeError``.
 
 ``await manager.stop()``
    Stop the checker task, clear available and leased pools, shut down owned
-   executors, and stop process log forwarding if it is running.
+   executors, and stop process log forwarding if it is running. Calling ``stop()`` before ``start()``
+   is safe and remains a no-op.
 
 Acquiring and releasing
 ~~~~~~~~~~~~~~~~~~~~~~~
