@@ -10,7 +10,11 @@ from collections.abc import Callable
 from concurrent.futures import Future as ConcurrentFuture
 from typing import Any
 
-from .manager import LeasedExecutorManager
+from .manager import (
+    LeasedExecutorManager,
+    _coerce_positive_int,
+    _coerce_finite_duration
+)
 
 
 logger = logging.getLogger(__name__)
@@ -62,18 +66,22 @@ class WorkGrinder:
             ValueError: If batch_size_threshold is not greater than 0.
             ValueError: If lease_seconds is not greater than 0.
         """
-        if max_wait_seconds <= 0:
-            raise ValueError("max_wait_seconds must be > 0")
-        if batch_size_threshold <= 0:
-            raise ValueError("batch_size_threshold must be > 0")
-        if lease_seconds <= 0:
-            raise ValueError("lease_seconds must be > 0")
+        max_wait_seconds = _coerce_finite_duration(
+            "max_wait_seconds", max_wait_seconds
+        )
+        batch_size_threshold = _coerce_positive_int(
+            "batch_size_threshold", batch_size_threshold
+        )
+        lease_seconds = _coerce_finite_duration(
+            "lease_seconds",
+            lease_seconds
+        )
 
         self._executor_manager = executor_manager
         self._logger = logger or logging.getLogger(__name__)
-        self._max_wait_seconds = float(max_wait_seconds)
-        self._batch_size_threshold = int(batch_size_threshold)
-        self._lease_seconds = float(lease_seconds)
+        self._max_wait_seconds = max_wait_seconds
+        self._batch_size_threshold = batch_size_threshold
+        self._lease_seconds = lease_seconds
         self._owner_prefix = owner_prefix
 
         self._pending: deque[_WorkItem] = deque()
@@ -213,6 +221,8 @@ class WorkGrinder:
             owner=owner,
         )
 
+        result_future.add_done_callback(self._on_result_future_done)
+
         async with self._condition:
             self._pending.append(item)
             pending_count = len(self._pending)
@@ -255,6 +265,8 @@ class WorkGrinder:
 
         if not self._started or loop is None or loop.is_closed():
             raise RuntimeError("WorkGrinder is not started")
+
+        self._reject_owner_loop_thread_sync_call("submit_from_thread")
 
         if self._stopping:
             raise RuntimeError("WorkGrinder is stopping")
@@ -337,6 +349,8 @@ class WorkGrinder:
         if not self._started or loop is None or loop.is_closed():
             raise RuntimeError("WorkGrinder is not started")
 
+        self._reject_owner_loop_thread_sync_call("stats_from_thread")
+
         future = asyncio.run_coroutine_threadsafe(self.astats(), loop)
         return future.result(timeout=timeout)
 
@@ -364,6 +378,63 @@ class WorkGrinder:
             )
 
         return owner_loop
+
+    def _reject_owner_loop_thread_sync_call(self, method_name: str) -> None:
+        """Reject sync thread APIs when called from the owning event-loop thread."""
+        owner_loop = self._loop
+
+        if owner_loop is None:
+            return
+
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        if running_loop is owner_loop:
+            raise RuntimeError(
+                f"WorkGrinder.{method_name}() cannot be called from the "
+                "owning event-loop thread; use the async API instead."
+            )
+
+    def _on_result_future_done(self, future: asyncio.Future[Any]) -> None:
+        """Schedule pending-queue cleanup when a queued result future is cancelled."""
+        if not future.cancelled():
+            return
+
+        loop = self._loop
+
+        if loop is None or loop.is_closed():
+            return
+
+        loop.create_task(self._remove_cancelled_pending_item(future))
+
+    async def _remove_cancelled_pending_item(
+        self,
+        future: asyncio.Future[Any],
+    ) -> None:
+        """Remove a cancelled future from the pending queue if it has not run yet."""
+        async with self._condition:
+            removed: _WorkItem | None = None
+
+            for item in self._pending:
+                if item.result_future is future:
+                    removed = item
+                    break
+
+            if removed is None:
+                return
+
+            self._pending.remove(removed)
+
+            self._logger.debug(
+                "Removed cancelled pending work work_id=%s owner=%s pending=%s",
+                removed.work_id,
+                removed.owner,
+                len(self._pending),
+            )
+
+            self._condition.notify_all()
 
     async def _grinder_loop(self) -> None:
         """The main loop of the WorkGrinder.
@@ -470,6 +541,7 @@ class WorkGrinder:
         )
 
         lease = None
+        submitted_items: list[_WorkItem] = []
         executor_futures: list[asyncio.Future[Any]] = []
 
         try:
@@ -483,27 +555,42 @@ class WorkGrinder:
 
             for item in live_batch:
                 call = functools.partial(item.fn, *item.args, **item.kwargs)
+                try:
+                    executor_future = loop.run_in_executor(
+                        lease.executor,
+                        call,
+                    )
+                except Exception as exc:
+                    self._logger.exception(
+                        "Failed to submit work batch_id=%s work_id=%s owner=%s",
+                        batch_id,
+                        item.work_id,
+                        item.owner,
+                    )
 
-                executor_future = loop.run_in_executor(
-                    lease.executor,
-                    call,
-                )
+                    for unsubmitted_item in live_batch[len(submitted_items):]:
+                        if not unsubmitted_item.result_future.done():
+                            unsubmitted_item.result_future.set_exception(exc)
 
+                    break
+
+                submitted_items.append(item)
                 executor_futures.append(executor_future)
 
-            results = await asyncio.gather(
-                *executor_futures,
-                return_exceptions=True,
-            )
+            if executor_futures:
+                results = await asyncio.gather(
+                    *executor_futures,
+                    return_exceptions=True,
+                )
 
-            for item, result in zip(live_batch, results, strict=True):
-                if item.result_future.done():
-                    continue
+                for item, result in zip(submitted_items, results, strict=True):
+                    if item.result_future.done():
+                        continue
 
-                if isinstance(result, BaseException):
-                    item.result_future.set_exception(result)
-                else:
-                    item.result_future.set_result(result)
+                    if isinstance(result, BaseException):
+                        item.result_future.set_exception(result)
+                    else:
+                        item.result_future.set_result(result)
 
             self._logger.info(
                 "Finished batch batch_id=%s size=%s",

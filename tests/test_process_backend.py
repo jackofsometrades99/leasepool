@@ -3,9 +3,13 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-
+import multiprocessing
 from helpers import count_primes, multiply, with_kwargs
-from leasepool import ExecutorBackend, LeasedExecutorManager, WorkGrinder
+from leasepool import (
+    ExecutorBackend,
+    LeasedExecutorManager,
+    WorkGrinder
+)
 
 
 @pytest.mark.asyncio
@@ -177,3 +181,52 @@ async def test_process_log_forwarding_composes_user_initializer(
         await wait_until(lambda: "worker multiplying 3 x 14" in caplog.text)
     finally:
         await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_process_log_forwarding_uses_non_fork_context_by_default() -> None:
+    manager = LeasedExecutorManager(
+        backend="process",
+        max_pools=2,
+        min_pools=1,
+        workers_per_pool=1,
+        forward_process_logs=True,
+    )
+
+    await manager.start()
+
+    try:
+        context = manager._process_log_mp_context  # type: ignore[attr-defined]
+
+        assert context is not None
+
+        if "forkserver" in multiprocessing.get_all_start_methods():
+            assert context.get_start_method() == "forkserver"
+        elif "spawn" in multiprocessing.get_all_start_methods():
+            assert context.get_start_method() == "spawn"
+        else:
+            assert context.get_start_method() == multiprocessing.get_start_method()
+    finally:
+        await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_process_log_forwarding_respects_explicit_mp_context() -> None:
+    explicit_context = multiprocessing.get_context("spawn")
+
+    manager = LeasedExecutorManager(
+        backend="process",
+        max_pools=2,
+        min_pools=1,
+        workers_per_pool=1,
+        forward_process_logs=True,
+        mp_context=explicit_context,
+    )
+
+    await manager.start()
+
+    try:
+        assert manager._process_log_mp_context is explicit_context  # type: ignore[attr-defined]
+    finally:
+        await manager.stop()
+

@@ -13,6 +13,59 @@ spread through the service.
 
 ## Release notes
 
+### 0.1.3 — 2026-06-03
+
+`leasepool` 0.1.3 is a correctness and safety release focused on WorkGrinder
+validation, event-loop ownership, cancellation cleanup, partial batch failure
+accuracy, and safer process-log-forwarding defaults.
+
+Highlights:
+
+* Added strict `WorkGrinder.batch_size_threshold` validation. Fractional values,
+  strings, booleans, zero, and negative values are rejected instead of being
+  silently truncated with `int(...)`.
+* Added strict finite-duration validation for `WorkGrinder.max_wait_seconds` and
+  `WorkGrinder.lease_seconds`. `NaN`, infinities, booleans, strings, zero, and
+  negative values are rejected at construction time.
+* Added `LeasedExecutorManager` owner-loop checks for `start()`, `stop()`, and
+  `acquire()`. Once a manager is started, loop-bound async APIs must be called
+  from the event loop that owns the manager.
+* Fixed wrong-loop `stop()` behavior so a failed cross-loop stop attempt no
+  longer mutates manager state or leaves the manager stuck in a stopping state.
+* Added guards to `WorkGrinder.submit_from_thread()` and
+  `WorkGrinder.stats_from_thread()` so they fail fast if accidentally called from
+  the grinder's owning event-loop thread. Use the async APIs from the owning
+  event loop and the thread-safe APIs from other OS threads.
+* Fixed cancelled pending WorkGrinder items so they are removed from the pending
+  queue immediately instead of staying queued until threshold, timeout, or stop.
+* Fixed partial WorkGrinder batch submission failure reporting. Work already
+  submitted to the executor now receives its real result or real exception; only
+  work that was not submitted receives the submission failure.
+* Process log forwarding now chooses a non-fork multiprocessing context by
+  default when the user does not provide `mp_context`, preferring `forkserver`
+  and then `spawn`. Explicit user-provided multiprocessing contexts are still
+  respected.
+* Expanded regression coverage for WorkGrinder validation, cancellation cleanup,
+  partial batch submission failures, cross-loop manager usage, thread-safe
+  WorkGrinder APIs, and process log forwarding context selection.
+
+Upgrade notes:
+
+* `WorkGrinder` now rejects invalid numeric configuration values earlier. Code
+  that previously relied on `batch_size_threshold=1.9` being truncated to `1`,
+  or `max_wait_seconds=float("nan")` being accepted, must be corrected.
+* `LeasedExecutorManager.start()`, `stop()`, and `acquire()` now enforce owning
+  event-loop usage after start. Create and use the manager within one event loop,
+  or expose your own thread-safe scheduling layer around that loop.
+* `WorkGrinder.submit_from_thread()` and `WorkGrinder.stats_from_thread()` are
+  only for non-owner OS threads. From the owning event loop, use
+  `await grinder.submit(...)`, `await grinder.enqueue(...)`, `grinder.stats()`,
+  or `await grinder.astats()`.
+* When process log forwarding is enabled without an explicit `mp_context`,
+  process pools will prefer `forkserver` or `spawn` instead of unsafe fork-after-
+  thread behavior. Process-backend callables, arguments, initializers, and return
+  values should be picklable and importable.
+
 ### 0.1.2 — 2026-06-01
 
 `leasepool` 0.1.2 is a stability release focused on production shutdown behavior, lease correctness, executor health handling, and stricter validation.
@@ -58,7 +111,8 @@ pip install -e .
 ## Free-threaded Python / no-GIL support
 
 `leasepool` is a pure Python package and does not ship native extension modules.
-It is intended to work on CPython free-threaded builds.
+It is intended to work on CPython free-threaded builds and has been tested on CPython 3.14t
+free-threaded builds with the GIL disabled.
 
 Current support level:
 
